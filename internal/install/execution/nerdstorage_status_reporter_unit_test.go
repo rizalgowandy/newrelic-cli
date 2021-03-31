@@ -11,164 +11,209 @@ import (
 	"github.com/newrelic/newrelic-cli/internal/install/types"
 )
 
-func TestReportRecipesAvailable_Basic(t *testing.T) {
+func TestRecipesAvailable_Basic(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup(nil)
+	status := NewInstallStatus(nil)
 
 	recipes := []types.Recipe{{}}
 
-	err := r.ReportRecipesAvailable(status, recipes)
+	err := r.RecipesAvailable(status, recipes)
 	require.NoError(t, err)
 }
 
-func TestReportRecipesAvailable_UserScopeError(t *testing.T) {
+func TestRecipesAvailable_UserScopeError(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
+	status := NewInstallStatus([]StatusSubscriber{r})
 
 	c.WriteDocumentWithUserScopeErr = errors.New("error")
 
 	recipes := []types.Recipe{{}}
 
-	err := r.ReportRecipesAvailable(status, recipes)
+	err := r.RecipesAvailable(status, recipes)
 	require.Error(t, err)
 }
 
-func TestReportRecipeInstalled_Basic(t *testing.T) {
+func TestRecipeInstalled_Basic(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
+	status := NewInstallStatus([]StatusSubscriber{r})
+	status.withEntityGUID("testGuid")
+	e := RecipeStatusEvent{}
 
-	e := RecipeStatusEvent{
-		EntityGUID: "testGuid",
-	}
-
-	err := r.ReportRecipeInstalled(status, e)
+	err := r.RecipeInstalled(status, e)
 	require.NoError(t, err)
 	require.Equal(t, 1, c.writeDocumentWithUserScopeCallCount)
 	require.Equal(t, 1, c.writeDocumentWithEntityScopeCallCount)
 }
 
-func TestReportRecipeInstalled_UserScopeOnly(t *testing.T) {
+func TestRecipeInstalled_UserScopeOnly(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
-
+	status := NewInstallStatus([]StatusSubscriber{r})
 	e := RecipeStatusEvent{}
 
-	err := r.ReportRecipeInstalled(status, e)
+	err := r.RecipeInstalled(status, e)
 	require.NoError(t, err)
 	require.Equal(t, 1, c.writeDocumentWithUserScopeCallCount)
 	require.Equal(t, 0, c.writeDocumentWithEntityScopeCallCount)
 }
 
-func TestReportRecipeInstalled_UserScopeError(t *testing.T) {
+func TestRecipeInstalled_MultipleEntityGUIDs(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
+	status := NewInstallStatus([]StatusSubscriber{r})
+	status.withEntityGUID("testGuid")
+	status.withEntityGUID("testGuid2")
+	e := RecipeStatusEvent{}
+
+	err := r.RecipeInstalled(status, e)
+	require.NoError(t, err)
+	require.Equal(t, 1, c.writeDocumentWithUserScopeCallCount)
+	require.Equal(t, 2, c.writeDocumentWithEntityScopeCallCount)
+}
+
+func TestRecipeInstalled_UserScopeError(t *testing.T) {
+	c := NewMockNerdStorageClient()
+	r := NewNerdStorageStatusReporter(c)
+	status := NewInstallStatus([]StatusSubscriber{r})
+	status.withEntityGUID("testGuid")
+	e := RecipeStatusEvent{}
 
 	c.WriteDocumentWithUserScopeErr = errors.New("error")
 
-	e := RecipeStatusEvent{
-		EntityGUID: "testGuid",
-	}
-
-	err := r.ReportRecipeInstalled(status, e)
+	err := r.RecipeInstalled(status, e)
 	require.Error(t, err)
 }
 
-func TestReportRecipeInstalled_EntityScopeError(t *testing.T) {
+func TestRecipeInstalled_EntityScopeError(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
+	status := NewInstallStatus([]StatusSubscriber{r})
+	status.withEntityGUID("testGuid")
+	e := RecipeStatusEvent{}
 
 	c.WriteDocumentWithEntityScopeErr = errors.New("error")
 
-	e := RecipeStatusEvent{
-		EntityGUID: "testGuid",
-	}
-
-	err := r.ReportRecipeInstalled(status, e)
+	err := r.RecipeInstalled(status, e)
 	require.Error(t, err)
 }
 
-func TestReportRecipeFailed_Basic(t *testing.T) {
+func TestRecipeFailed_Basic(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
+	status := NewInstallStatus([]StatusSubscriber{r})
+	status.withEntityGUID("testGuid")
+	e := RecipeStatusEvent{}
 
-	e := RecipeStatusEvent{
-		EntityGUID: "testGuid",
-	}
-
-	err := r.ReportRecipeFailed(status, e)
+	err := r.RecipeFailed(status, e)
 	require.NoError(t, err)
 	require.Equal(t, 1, c.writeDocumentWithUserScopeCallCount)
 	require.Equal(t, 1, c.writeDocumentWithEntityScopeCallCount)
 }
 
-func TestReportRecipeFailed_UserScopeOnly(t *testing.T) {
+func TestRecipeFailed_UserScopeOnly(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
+	status := NewInstallStatus([]StatusSubscriber{r})
 
 	e := RecipeStatusEvent{}
 
-	err := r.ReportRecipeFailed(status, e)
+	err := r.RecipeFailed(status, e)
 	require.NoError(t, err)
 	require.Equal(t, 1, c.writeDocumentWithUserScopeCallCount)
 	require.Equal(t, 0, c.writeDocumentWithEntityScopeCallCount)
 }
 
-func TestReportRecipeFailed_UserScopeError(t *testing.T) {
+func TestRecipeFailed_UserScopeError(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
+	status := NewInstallStatus([]StatusSubscriber{r})
+	status.withEntityGUID("testGuid")
+	e := RecipeStatusEvent{}
 
 	c.WriteDocumentWithUserScopeErr = errors.New("error")
 
-	e := RecipeStatusEvent{
-		EntityGUID: "testGuid",
-	}
-
-	err := r.ReportRecipeFailed(status, e)
+	err := r.RecipeFailed(status, e)
 	require.Error(t, err)
 }
 
-func TestReportRecipeFailed_EntityScopeError(t *testing.T) {
+func TestRecipeFailed_EntityScopeError(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
+	status := NewInstallStatus([]StatusSubscriber{r})
+	status.withEntityGUID("testGuid")
+	e := RecipeStatusEvent{}
 
 	c.WriteDocumentWithEntityScopeErr = errors.New("error")
 
-	e := RecipeStatusEvent{
-		EntityGUID: "testGuid",
-	}
-
-	err := r.ReportRecipeFailed(status, e)
+	err := r.RecipeFailed(status, e)
 	require.Error(t, err)
 }
 
-func TestReportComplete_Basic(t *testing.T) {
+func TestInstallComplete_Basic(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
+	status := NewInstallStatus([]StatusSubscriber{r})
 
-	err := r.ReportComplete(status)
+	err := r.InstallComplete(status)
 	require.NoError(t, err)
 	require.Equal(t, 1, c.writeDocumentWithUserScopeCallCount)
 	require.Equal(t, 0, c.writeDocumentWithEntityScopeCallCount)
 }
 
-func TestReportComplete_UserScopeError(t *testing.T) {
+func TestInstallComplete_UserScopeError(t *testing.T) {
 	c := NewMockNerdStorageClient()
 	r := NewNerdStorageStatusReporter(c)
-	status := NewStatusRollup([]StatusReporter{r})
+	status := NewInstallStatus([]StatusSubscriber{r})
 
 	c.WriteDocumentWithUserScopeErr = errors.New("error")
 
-	err := r.ReportComplete(status)
+	err := r.InstallComplete(status)
+	require.Error(t, err)
+}
+
+func TestInstallCanceled_Basic(t *testing.T) {
+	c := NewMockNerdStorageClient()
+	r := NewNerdStorageStatusReporter(c)
+	status := NewInstallStatus([]StatusSubscriber{r})
+
+	err := r.InstallCanceled(status)
+	require.NoError(t, err)
+	require.Equal(t, 1, c.writeDocumentWithUserScopeCallCount)
+	require.Equal(t, 0, c.writeDocumentWithEntityScopeCallCount)
+}
+
+func TestInstallCanceled_UserScopeError(t *testing.T) {
+	c := NewMockNerdStorageClient()
+	r := NewNerdStorageStatusReporter(c)
+	status := NewInstallStatus([]StatusSubscriber{r})
+
+	c.WriteDocumentWithUserScopeErr = errors.New("error")
+
+	err := r.InstallCanceled(status)
+	require.Error(t, err)
+}
+
+func TestDiscoveryComplete_Basic(t *testing.T) {
+	c := NewMockNerdStorageClient()
+	r := NewNerdStorageStatusReporter(c)
+	status := NewInstallStatus([]StatusSubscriber{r})
+
+	err := r.DiscoveryComplete(status, types.DiscoveryManifest{})
+	require.NoError(t, err)
+	require.Equal(t, 1, c.writeDocumentWithUserScopeCallCount)
+	require.Equal(t, 0, c.writeDocumentWithEntityScopeCallCount)
+}
+
+func TestDiscoveryComplete_UserScopeError(t *testing.T) {
+	c := NewMockNerdStorageClient()
+	r := NewNerdStorageStatusReporter(c)
+	status := NewInstallStatus([]StatusSubscriber{r})
+
+	c.WriteDocumentWithUserScopeErr = errors.New("error")
+
+	err := r.DiscoveryComplete(status, types.DiscoveryManifest{})
 	require.Error(t, err)
 }

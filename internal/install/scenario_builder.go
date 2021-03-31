@@ -1,20 +1,27 @@
 package install
 
 import (
+	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
+
 	"github.com/newrelic/newrelic-cli/internal/install/discovery"
 	"github.com/newrelic/newrelic-cli/internal/install/execution"
 	"github.com/newrelic/newrelic-cli/internal/install/recipes"
 	"github.com/newrelic/newrelic-cli/internal/install/types"
 	"github.com/newrelic/newrelic-cli/internal/install/ux"
 	"github.com/newrelic/newrelic-cli/internal/install/validation"
+	"github.com/newrelic/newrelic-client-go/pkg/nrdb"
 )
 
 type TestScenario string
 
 const (
-	Basic      TestScenario = "BASIC"
-	LogMatches TestScenario = "LOG_MATCHES"
-	Fail       TestScenario = "FAIL"
+	Basic               TestScenario = "BASIC"
+	LogMatches          TestScenario = "LOG_MATCHES"
+	Fail                TestScenario = "FAIL"
+	StitchedPath        TestScenario = "STITCHED_PATH"
+	Canceled            TestScenario = "CANCELED"
+	DisplayExplorerLink TestScenario = "DISPLAY_EXPLORER_LINK"
 )
 
 var (
@@ -22,6 +29,19 @@ var (
 		Basic,
 		LogMatches,
 		Fail,
+		StitchedPath,
+		Canceled,
+		DisplayExplorerLink,
+	}
+	emptyResults = []nrdb.NRDBResult{
+		map[string]interface{}{
+			"count": 0.0,
+		},
+	}
+	nonEmptyResults = []nrdb.NRDBResult{
+		map[string]interface{}{
+			"count": 1.0,
+		},
 	}
 )
 
@@ -54,6 +74,12 @@ func (b *ScenarioBuilder) BuildScenario(s TestScenario) *RecipeInstaller {
 		return b.LogMatches()
 	case Fail:
 		return b.Fail()
+	case StitchedPath:
+		return b.StitchedPath()
+	case Canceled:
+		return b.CanceledInstall()
+	case DisplayExplorerLink:
+		return b.DisplayExplorerLink()
 	}
 
 	return nil
@@ -62,13 +88,15 @@ func (b *ScenarioBuilder) BuildScenario(s TestScenario) *RecipeInstaller {
 func (b *ScenarioBuilder) Basic() *RecipeInstaller {
 
 	// mock implementations
-	rf := setupRecipeFetcher()
-	ers := []execution.StatusReporter{
+	rf := setupRecipeFetcherGuidedInstall()
+	ers := []execution.StatusSubscriber{
 		execution.NewMockStatusReporter(),
 		execution.NewTerminalStatusReporter(),
 	}
-	statusRollup := execution.NewStatusRollup(ers)
-	v := validation.NewMockRecipeValidator()
+	statusRollup := execution.NewInstallStatus(ers)
+	c := validation.NewMockNRDBClient()
+	c.ReturnResultsAfterNAttempts(emptyResults, nonEmptyResults, 2)
+	v := validation.NewPollingRecipeValidator(c)
 
 	pf := discovery.NewRegexProcessFilterer(rf)
 	ff := recipes.NewRecipeFileFetcher()
@@ -76,7 +104,7 @@ func (b *ScenarioBuilder) Basic() *RecipeInstaller {
 	gff := discovery.NewGlobFileFilterer()
 	re := execution.NewGoTaskRecipeExecutor()
 	p := ux.NewPromptUIPrompter()
-	s := ux.NewSpinner()
+	s := ux.NewPlainProgress()
 
 	i := RecipeInstaller{
 		discoverer:        d,
@@ -98,13 +126,15 @@ func (b *ScenarioBuilder) Basic() *RecipeInstaller {
 func (b *ScenarioBuilder) Fail() *RecipeInstaller {
 
 	// mock implementations
-	rf := setupRecipeFetcher()
-	ers := []execution.StatusReporter{
+	rf := setupRecipeFetcherGuidedInstall()
+	ers := []execution.StatusSubscriber{
 		execution.NewMockStatusReporter(),
 		execution.NewTerminalStatusReporter(),
 	}
-	statusRollup := execution.NewStatusRollup(ers)
-	v := validation.NewMockRecipeValidator()
+	statusRollup := execution.NewInstallStatus(ers)
+	c := validation.NewMockNRDBClient()
+	c.ReturnResultsAfterNAttempts(emptyResults, nonEmptyResults, 2)
+	v := validation.NewPollingRecipeValidator(c)
 
 	pf := discovery.NewRegexProcessFilterer(rf)
 	ff := recipes.NewRecipeFileFetcher()
@@ -112,7 +142,7 @@ func (b *ScenarioBuilder) Fail() *RecipeInstaller {
 	gff := discovery.NewGlobFileFilterer()
 	re := execution.NewMockFailingRecipeExecutor()
 	p := ux.NewPromptUIPrompter()
-	s := ux.NewSpinner()
+	pi := ux.NewPlainProgress()
 
 	i := RecipeInstaller{
 		discoverer:        d,
@@ -123,7 +153,7 @@ func (b *ScenarioBuilder) Fail() *RecipeInstaller {
 		recipeFileFetcher: ff,
 		status:            statusRollup,
 		prompter:          p,
-		progressIndicator: s,
+		progressIndicator: pi,
 	}
 
 	i.InstallerContext = b.installerContext
@@ -134,13 +164,15 @@ func (b *ScenarioBuilder) Fail() *RecipeInstaller {
 func (b *ScenarioBuilder) LogMatches() *RecipeInstaller {
 
 	// mock implementations
-	rf := setupRecipeFetcher()
-	ers := []execution.StatusReporter{
+	rf := setupRecipeFetcherGuidedInstall()
+	ers := []execution.StatusSubscriber{
 		execution.NewMockStatusReporter(),
 		execution.NewTerminalStatusReporter(),
 	}
-	statusRollup := execution.NewStatusRollup(ers)
-	v := validation.NewMockRecipeValidator()
+	statusRollup := execution.NewInstallStatus(ers)
+	c := validation.NewMockNRDBClient()
+	c.ReturnResultsAfterNAttempts(emptyResults, nonEmptyResults, 2)
+	v := validation.NewPollingRecipeValidator(c)
 	gff := discovery.NewMockFileFilterer()
 
 	pf := discovery.NewRegexProcessFilterer(rf)
@@ -148,7 +180,7 @@ func (b *ScenarioBuilder) LogMatches() *RecipeInstaller {
 	d := discovery.NewPSUtilDiscoverer(pf)
 	re := execution.NewGoTaskRecipeExecutor()
 	p := ux.NewPromptUIPrompter()
-	s := ux.NewSpinner()
+	pi := ux.NewPlainProgress()
 
 	gff.FilterVal = []types.LogMatch{
 		{
@@ -166,7 +198,7 @@ func (b *ScenarioBuilder) LogMatches() *RecipeInstaller {
 		recipeFileFetcher: ff,
 		status:            statusRollup,
 		prompter:          p,
-		progressIndicator: s,
+		progressIndicator: pi,
 	}
 
 	i.InstallerContext = b.installerContext
@@ -174,18 +206,132 @@ func (b *ScenarioBuilder) LogMatches() *RecipeInstaller {
 	return &i
 }
 
-func setupRecipeFetcher() recipes.RecipeFetcher {
+func (b *ScenarioBuilder) StitchedPath() *RecipeInstaller {
+	// mock implementations
+	rf := setupRecipeFetcherStitchedPath()
+	ers := []execution.StatusSubscriber{
+		execution.NewMockStatusReporter(),
+		execution.NewTerminalStatusReporter(),
+	}
+	statusRollup := execution.NewInstallStatus(ers)
+	c := validation.NewMockNRDBClient()
+	c.ReturnResultsAfterNAttempts(emptyResults, nonEmptyResults, 2)
+	v := validation.NewPollingRecipeValidator(c)
+
+	pf := discovery.NewRegexProcessFilterer(rf)
+	ff := recipes.NewRecipeFileFetcher()
+	d := discovery.NewPSUtilDiscoverer(pf)
+	gff := discovery.NewGlobFileFilterer()
+	re := execution.NewGoTaskRecipeExecutor()
+	p := ux.NewPromptUIPrompter()
+	pi := ux.NewPlainProgress()
+
+	i := RecipeInstaller{
+		discoverer:        d,
+		fileFilterer:      gff,
+		recipeFetcher:     rf,
+		recipeExecutor:    re,
+		recipeValidator:   v,
+		recipeFileFetcher: ff,
+		status:            statusRollup,
+		prompter:          p,
+		progressIndicator: pi,
+	}
+
+	i.InstallerContext = b.installerContext
+
+	return &i
+}
+
+func (b *ScenarioBuilder) CanceledInstall() *RecipeInstaller {
+	// mock implementations
+	rf := setupRecipeCanceledInstall()
+	ers := []execution.StatusSubscriber{
+		execution.NewMockStatusReporter(),
+		execution.NewTerminalStatusReporter(),
+	}
+	statusRollup := execution.NewInstallStatus(ers)
+	c := validation.NewMockNRDBClient()
+	c.ReturnResultsAfterNAttempts(emptyResults, nonEmptyResults, 2)
+	v := validation.NewPollingRecipeValidator(c)
+
+	pf := discovery.NewRegexProcessFilterer(rf)
+	ff := recipes.NewRecipeFileFetcher()
+	d := discovery.NewPSUtilDiscoverer(pf)
+	gff := discovery.NewGlobFileFilterer()
+	re := execution.NewGoTaskRecipeExecutor()
+	p := ux.NewPromptUIPrompter()
+	pi := ux.NewPlainProgress()
+
+	i := RecipeInstaller{
+		discoverer:        d,
+		fileFilterer:      gff,
+		recipeFetcher:     rf,
+		recipeExecutor:    re,
+		recipeValidator:   v,
+		recipeFileFetcher: ff,
+		status:            statusRollup,
+		prompter:          p,
+		progressIndicator: pi,
+	}
+
+	i.InstallerContext = b.installerContext
+
+	return &i
+}
+
+func (b *ScenarioBuilder) DisplayExplorerLink() *RecipeInstaller {
+	log.StandardLogger().SetLevel(logrus.DebugLevel)
+
+	// mock implementations
+	rf := setupDisplayExplorerLink()
+	ers := []execution.StatusSubscriber{
+		execution.NewMockStatusReporter(),
+		execution.NewTerminalStatusReporter(),
+	}
+	statusRollup := execution.NewInstallStatus(ers)
+	c := validation.NewMockNRDBClient()
+	c.ReturnResultsAfterNAttempts(emptyResults, nonEmptyResults, 2)
+	v := validation.NewPollingRecipeValidator(c)
+
+	pf := discovery.NewRegexProcessFilterer(rf)
+	ff := recipes.NewRecipeFileFetcher()
+	d := discovery.NewPSUtilDiscoverer(pf)
+	gff := discovery.NewGlobFileFilterer()
+	re := execution.NewGoTaskRecipeExecutor()
+	p := ux.NewPromptUIPrompter()
+	pi := ux.NewPlainProgress()
+
+	i := RecipeInstaller{
+		discoverer:        d,
+		fileFilterer:      gff,
+		recipeFetcher:     rf,
+		recipeExecutor:    re,
+		recipeValidator:   v,
+		recipeFileFetcher: ff,
+		status:            statusRollup,
+		prompter:          p,
+		progressIndicator: pi,
+	}
+
+	i.InstallerContext = b.installerContext
+
+	return &i
+}
+
+func setupRecipeFetcherGuidedInstall() recipes.RecipeFetcher {
 	f := recipes.NewMockRecipeFetcher()
 	f.FetchRecipeVals = []types.Recipe{
 		{
-			Name: "Infrastructure Agent Installer",
-			PreInstall: types.RecipePreInstall{
+			Name:        "infrastructure-agent-installer",
+			DisplayName: "Infrastructure Agent",
+			PreInstall: types.OpenInstallationPreInstallConfiguration{
 				Info: `
 This is the Infrastructure Agent Installer preinstall message.
 It is made up of a multi line string.
 				`,
 			},
-			PostInstall: types.RecipePostInstall{
+			PostInstall: types.OpenInstallationPostInstallConfiguration{
 				Info: `
 This is the Infrastructure Agent Installer postinstall message.
 It is made up of a multi line string.
@@ -194,7 +340,8 @@ It is made up of a multi line string.
 			ValidationNRQL: "test NRQL",
 			File: `
 ---
-name: Infrastructure Agent Installer
+name: infra-agent
+displayName: Infrastructure Agent
 install:
   version: "3"
   tasks:
@@ -202,11 +349,13 @@ install:
 `,
 		},
 		{
-			Name:           "Logs integration",
+			Name:           "logs-integration",
+			DisplayName:    "Logs integration",
 			ValidationNRQL: "test NRQL",
 			File: `
 ---
-name: Logs integration
+name: logs-integration
+displayName: Logs integration
 install:
   version: "3"
   tasks:
@@ -216,11 +365,156 @@ install:
 	}
 	f.FetchRecommendationsVal = []types.Recipe{
 		{
-			Name:           "Recommended recipe",
+			Name:           "recommended-recipe",
+			DisplayName:    "Recommended recipe",
 			ValidationNRQL: "test NRQL",
 			File: `
 ---
-name: Recommended recipe
+name: recommended-recipe
+displayName: Recommended recipe
+install:
+  version: "3"
+  tasks:
+    default:
+`,
+		},
+	}
+
+	return f
+}
+
+func setupRecipeFetcherStitchedPath() recipes.RecipeFetcher {
+	f := recipes.NewMockRecipeFetcher()
+	f.FetchRecipeVals = []types.Recipe{
+		{
+			Name:           "recommended-recipe",
+			DisplayName:    "Recommended recipe",
+			ValidationNRQL: "test NRQL",
+			File: `
+---
+name: recommended-recipe
+displayName: Recommended recipe
+install:
+  version: "3"
+  tasks:
+    default:
+`,
+		},
+		{
+			Name:           "another-recommended-recipe",
+			DisplayName:    "Another Recommended recipe",
+			ValidationNRQL: "test NRQL",
+			File: `
+---
+name: another-recommended-recipe
+displayName: Another Recommended recipe
+install:
+  version: "3"
+  tasks:
+    default:
+`,
+		},
+	}
+
+	return f
+}
+
+func setupRecipeCanceledInstall() recipes.RecipeFetcher {
+	f := recipes.NewMockRecipeFetcher()
+	f.FetchRecipeVals = []types.Recipe{
+		{
+			Name:           "infrastructure-agent-installer",
+			DisplayName:    "Infrastructure Agent",
+			ValidationNRQL: "test NRQL",
+			File: `
+---
+name: infra-agent
+displayName: Infrastructure Agent
+install:
+  version: "3"
+  tasks:
+    default:
+`,
+		},
+		{
+			Name:           "test-canceled-installation",
+			DisplayName:    "Test Canceled Installation",
+			ValidationNRQL: "test NRQL",
+			File: `
+---
+name: test-canceled-installation
+displayName: Test Canceled Installation
+description: Scenario to test when a user cancels installation via ctl+c
+
+processMatch: []
+
+validationNrql: "SELECT count(*) from SystemSample where hostname like '{{.HOSTNAME}}' FACET entityGuid SINCE 10 minutes ago"
+
+install:
+  version: "3"
+  silent: true
+  tasks:
+    default:
+      cmds:
+        - task: run
+    run:
+      cmds:
+        - |
+          echo "sleeping 10 seconds"
+          sleep 10
+`,
+		},
+	}
+
+	return f
+}
+
+func setupDisplayExplorerLink() recipes.RecipeFetcher {
+	f := recipes.NewMockRecipeFetcher()
+	f.FetchRecipeVals = []types.Recipe{
+		{
+			Name:           "test-display-explorer-link",
+			DisplayName:    "Test Display Explorer Link",
+			ValidationNRQL: "test NRQL",
+			SuccessLinkConfig: types.SuccessLinkConfig{
+				Type:   "explorer",
+				Filter: "\"`tags.language` = 'java'\"",
+			},
+			File: `
+---
+name: test-display-explorer-link
+displayName: Test Display Explorer Link
+description: Scenario to test when a recipe designates a filtered explorer link
+
+processMatch: []
+
+validationNrql: "SELECT count(*) from SystemSample where hostname like '{{.HOSTNAME}}' FACET entityGuid SINCE 10 minutes ago"
+
+successLinkConfig:
+  type: explorer
+  filter: "` + "`tags.language`" + ` = 'java'"
+
+install:
+  version: "3"
+  silent: true
+  tasks:
+    default:
+      cmds:
+        - task: run
+    run:
+      cmds:
+        - |
+          echo "executing recipe steps"
+`,
+		},
+		{
+			Name:           "infrastructure-agent-installer",
+			DisplayName:    "Infrastructure Agent",
+			ValidationNRQL: "test NRQL",
+			File: `
+---
+name: infra-agent
+displayName: Infrastructure Agent
 install:
   version: "3"
   tasks:

@@ -6,10 +6,10 @@ func NewMockProgressIndicator() *MockProgressIndicator {
 	return &MockProgressIndicator{}
 }
 
-func (s *MockProgressIndicator) Fail() {
+func (s *MockProgressIndicator) Fail(string) {
 }
 
-func (s MockProgressIndicator) Success() {
+func (s MockProgressIndicator) Success(string) {
 }
 
 func (s *MockProgressIndicator) Start(string) {

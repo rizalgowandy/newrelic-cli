@@ -2,6 +2,7 @@ package execution
 
 import (
 	"fmt"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 
@@ -9,36 +10,43 @@ import (
 )
 
 type TerminalStatusReporter struct {
+	successLinkGenerator SuccessLinkGenerator
 }
 
 // NewTerminalStatusReporter is an implementation of the ExecutionStatusReporter interface that reports execution status to STDOUT.
 func NewTerminalStatusReporter() *TerminalStatusReporter {
-	r := TerminalStatusReporter{}
+	r := TerminalStatusReporter{
+		successLinkGenerator: NewConcreteSuccessLinkGenerator(),
+	}
 
 	return &r
 }
 
-func (r TerminalStatusReporter) ReportRecipeFailed(status *StatusRollup, event RecipeStatusEvent) error {
+func (r TerminalStatusReporter) RecipeFailed(status *InstallStatus, event RecipeStatusEvent) error {
 	return nil
 }
 
-func (r TerminalStatusReporter) ReportRecipeInstalling(status *StatusRollup, event RecipeStatusEvent) error {
+func (r TerminalStatusReporter) RecipeInstalling(status *InstallStatus, event RecipeStatusEvent) error {
 	return nil
 }
 
-func (r TerminalStatusReporter) ReportRecipeInstalled(status *StatusRollup, event RecipeStatusEvent) error {
+func (r TerminalStatusReporter) RecipeInstalled(status *InstallStatus, event RecipeStatusEvent) error {
 	return nil
 }
 
-func (r TerminalStatusReporter) ReportRecipeSkipped(status *StatusRollup, event RecipeStatusEvent) error {
+func (r TerminalStatusReporter) RecipeSkipped(status *InstallStatus, event RecipeStatusEvent) error {
 	return nil
 }
 
-func (r TerminalStatusReporter) ReportRecipeRecommended(status *StatusRollup, event RecipeStatusEvent) error {
+func (r TerminalStatusReporter) RecipeRecommended(status *InstallStatus, event RecipeStatusEvent) error {
 	return nil
 }
 
-func (r TerminalStatusReporter) ReportRecipesAvailable(status *StatusRollup, recipes []types.Recipe) error {
+func (r TerminalStatusReporter) RecipesAvailable(status *InstallStatus, recipes []types.Recipe) error {
+	return nil
+}
+
+func (r TerminalStatusReporter) RecipesSelected(status *InstallStatus, recipes []types.Recipe) error {
 	if len(recipes) > 0 {
 		fmt.Println("The following will be installed:")
 	}
@@ -60,28 +68,64 @@ func (r TerminalStatusReporter) ReportRecipesAvailable(status *StatusRollup, rec
 	return nil
 }
 
-func (r TerminalStatusReporter) ReportRecipeAvailable(status *StatusRollup, recipe types.Recipe) error {
+func (r TerminalStatusReporter) RecipeAvailable(status *InstallStatus, recipe types.Recipe) error {
 	return nil
 }
 
-func (r TerminalStatusReporter) ReportComplete(status *StatusRollup) error {
-
-	if status.hasFailed() {
-		return fmt.Errorf("one or more integrations failed to install, check the install log for more details: %s", status.LogFilePath)
+func (r TerminalStatusReporter) InstallComplete(status *InstallStatus) error {
+	if status.isCanceled() {
+		return nil
 	}
 
-	msg := `
-  Success! Your data is available in New Relic.
+	if status.hasFailed() {
+		fmt.Printf("  One or more integrations failed to install.  Check the install log for more details: %s\n", status.LogFilePath)
+	}
 
-  Go to New Relic to confirm and start exploring your data.`
+	recs := status.recommendations()
 
-	fmt.Println(msg)
+	if len(recs) > 0 {
+		fmt.Println("  ---")
+		fmt.Println("  Instrumentation recommendations")
+		fmt.Println("  We discovered some additional instrumentation opportunities:")
 
-	for _, entityGUID := range status.EntityGUIDs {
-		fmt.Printf("\n  https://one.newrelic.com/redirect/entity/%s\n", entityGUID)
+		for _, recommendation := range recs {
+			fmt.Printf("  - %s\n", recommendation.DisplayName)
+		}
+
+		fmt.Println("Please refer to the \"Data gaps\" section in the link to your data.")
+		fmt.Println("  ---")
+	}
+
+	fmt.Println("  New Relic installation complete!")
+
+	linkToData := r.getSuccessLink(status)
+
+	if linkToData != "" {
+		fmt.Printf("  Your data is available at %s", linkToData)
 	}
 
 	fmt.Println()
 
+	return nil
+}
+
+func (r *TerminalStatusReporter) getSuccessLink(status *InstallStatus) string {
+	var link string
+	switch t := status.successLinkConfig.Type; {
+	case strings.EqualFold(t, "explorer"):
+		link = r.successLinkGenerator.GenerateExplorerLink(status.successLinkConfig.Filter)
+	default:
+		link = r.successLinkGenerator.GenerateEntityLink(status.HostEntityGUID())
+
+	}
+
+	return link
+}
+
+func (r TerminalStatusReporter) InstallCanceled(status *InstallStatus) error {
+	return nil
+}
+
+func (r TerminalStatusReporter) DiscoveryComplete(status *InstallStatus, dm types.DiscoveryManifest) error {
 	return nil
 }

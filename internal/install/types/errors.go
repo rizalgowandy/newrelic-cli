@@ -1,13 +1,11 @@
 package types
 
+import (
+	"errors"
+)
+
 // ErrInterrupt represents a context cancellation.
-type ErrInterrupt struct{}
+var ErrInterrupt = errors.New("operation canceled")
 
-func (e *ErrInterrupt) Error() string {
-	return "operation cancelled"
-}
-
-// NewErrInterrupt creates a new instance of ErrInterrupt.
-func NewErrInterrupt() *ErrInterrupt {
-	return &ErrInterrupt{}
-}
+// nolint: golint
+var ErrorFetchingLicenseKey = errors.New("Oops, we're having some difficulties fetching your license key. Please try again later, or see our documentation for installing manually https://docs.newrelic.com/docs/using-new-relic/cross-product-functions/install-configure/install-new-relic")

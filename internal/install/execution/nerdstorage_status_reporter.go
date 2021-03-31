@@ -27,94 +27,80 @@ func NewNerdStorageStatusReporter(client NerdStorageClient) *NerdstorageStatusRe
 	return &r
 }
 
-// ReportRecipesAvailable reports that recipes are available for installation on
+// RecipesAvailable reports that recipes are available for installation on
 // the underlying host.
-func (r NerdstorageStatusReporter) ReportRecipesAvailable(status *StatusRollup, recipes []types.Recipe) error {
-	if err := r.writeStatus(status, ""); err != nil {
-		return err
-	}
+func (r NerdstorageStatusReporter) RecipesAvailable(status *InstallStatus, recipes []types.Recipe) error {
+	return r.writeStatus(status)
+}
 
+func (r NerdstorageStatusReporter) RecipesSelected(status *InstallStatus, recipes []types.Recipe) error {
 	return nil
 }
 
-// ReportRecipeAvailable reports that a recipe is available for installation on
+// RecipeAvailable reports that a recipe is available for installation on
 // the underlying host.
-func (r NerdstorageStatusReporter) ReportRecipeAvailable(status *StatusRollup, recipe types.Recipe) error {
-	if err := r.writeStatus(status, ""); err != nil {
+func (r NerdstorageStatusReporter) RecipeAvailable(status *InstallStatus, recipe types.Recipe) error {
+	return r.writeStatus(status)
+}
+
+func (r NerdstorageStatusReporter) RecipeFailed(status *InstallStatus, event RecipeStatusEvent) error {
+	return r.writeStatus(status)
+}
+
+func (r NerdstorageStatusReporter) RecipeInstalling(status *InstallStatus, event RecipeStatusEvent) error {
+	return r.writeStatus(status)
+}
+
+func (r NerdstorageStatusReporter) RecipeInstalled(status *InstallStatus, event RecipeStatusEvent) error {
+	return r.writeStatus(status)
+}
+
+func (r NerdstorageStatusReporter) RecipeRecommended(status *InstallStatus, event RecipeStatusEvent) error {
+	return r.writeStatus(status)
+}
+
+func (r NerdstorageStatusReporter) RecipeSkipped(status *InstallStatus, event RecipeStatusEvent) error {
+	return r.writeStatus(status)
+}
+
+func (r NerdstorageStatusReporter) InstallComplete(status *InstallStatus) error {
+	return r.writeStatus(status)
+}
+
+func (r NerdstorageStatusReporter) InstallCanceled(status *InstallStatus) error {
+	return r.writeStatus(status)
+}
+
+func (r NerdstorageStatusReporter) DiscoveryComplete(status *InstallStatus, dm types.DiscoveryManifest) error {
+	if err := r.writeStatus(status); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (r NerdstorageStatusReporter) ReportRecipeFailed(status *StatusRollup, event RecipeStatusEvent) error {
-	if err := r.writeStatus(status, event.EntityGUID); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (r NerdstorageStatusReporter) ReportRecipeInstalling(status *StatusRollup, event RecipeStatusEvent) error {
-	if err := r.writeStatus(status, event.EntityGUID); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (r NerdstorageStatusReporter) ReportRecipeInstalled(status *StatusRollup, event RecipeStatusEvent) error {
-	if err := r.writeStatus(status, event.EntityGUID); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (r NerdstorageStatusReporter) ReportRecipeRecommended(status *StatusRollup, event RecipeStatusEvent) error {
-	if err := r.writeStatus(status, event.EntityGUID); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (r NerdstorageStatusReporter) ReportRecipeSkipped(status *StatusRollup, event RecipeStatusEvent) error {
-	if err := r.writeStatus(status, event.EntityGUID); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (r NerdstorageStatusReporter) ReportComplete(status *StatusRollup) error {
-	if err := r.writeStatus(status, ""); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (r NerdstorageStatusReporter) writeStatus(status *StatusRollup, entityGUID string) error {
+func (r NerdstorageStatusReporter) writeStatus(status *InstallStatus) error {
 	i := r.buildExecutionStatusDocument(status)
 	_, err := r.client.WriteDocumentWithUserScope(i)
 	if err != nil {
 		return err
 	}
 
-	if entityGUID != "" {
-		_, err := r.client.WriteDocumentWithEntityScope(entityGUID, i)
+	for _, g := range status.EntityGUIDs {
+		_, err := r.client.WriteDocumentWithEntityScope(g, i)
 		if err != nil {
 			return err
 		}
-	} else {
-		log.Debug("No entity GUID available, skipping entity-scoped status update.")
+	}
+
+	if len(status.EntityGUIDs) == 0 {
+		log.Debug("no entity GUIDs available, skipping entity-scoped status updates")
 	}
 
 	return nil
 }
 
-func (r NerdstorageStatusReporter) buildExecutionStatusDocument(status *StatusRollup) nerdstorage.WriteDocumentInput {
+func (r NerdstorageStatusReporter) buildExecutionStatusDocument(status *InstallStatus) nerdstorage.WriteDocumentInput {
 	return nerdstorage.WriteDocumentInput{
 		PackageID:  packageID,
 		Collection: collectionID,

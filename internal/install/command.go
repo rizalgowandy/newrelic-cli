@@ -7,8 +7,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/newrelic/newrelic-cli/internal/client"
-	"github.com/newrelic/newrelic-cli/internal/config"
 	"github.com/newrelic/newrelic-cli/internal/credentials"
+	"github.com/newrelic/newrelic-cli/internal/install/types"
 	"github.com/newrelic/newrelic-client-go/newrelic"
 )
 
@@ -26,9 +26,8 @@ var (
 
 // Command represents the install command.
 var Command = &cobra.Command{
-	Use:    "install",
-	Short:  "Install New Relic.",
-	Hidden: true,
+	Use:   "install",
+	Short: "Install New Relic.",
 	Run: func(cmd *cobra.Command, args []string) {
 		ic := InstallerContext{
 			AssumeYes:          assumeYes,
@@ -57,7 +56,11 @@ var Command = &cobra.Command{
 
 			// Run the install.
 			if err := i.Install(); err != nil {
-				log.Fatalf("Could not install New Relic: %s, check the install log for details: %s", err, config.DefaultLogFile)
+				if err == types.ErrInterrupt {
+					return
+				}
+
+				log.Fatalf("We encountered an error during the installation: %s. If this problem persists please visit the documentation and support page for additional help here: https://one.nr/06vjAeZLKjP", err)
 			}
 		})
 	},

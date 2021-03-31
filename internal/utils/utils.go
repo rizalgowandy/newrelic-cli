@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	b64 "encoding/base64"
 	"fmt"
 	"os"
 	"os/signal"
@@ -106,4 +107,18 @@ func MinOf(vars ...int) int {
 // GetTimestamp returns the current epoch timestamp in seconds.
 func GetTimestamp() int64 {
 	return time.Now().Unix()
+}
+
+// MakeRange generates a slice of sequential integers.
+func MakeRange(min, max int) []int {
+	a := make([]int, max-min+1)
+	for i := range a {
+		a[i] = min + i
+	}
+	return a
+}
+
+// Base64Encode base 64 encodes a string.
+func Base64Encode(data string) string {
+	return b64.StdEncoding.EncodeToString([]byte(data))
 }

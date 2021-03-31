@@ -1,9 +1,10 @@
 package install
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"net/url"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 
@@ -17,11 +18,6 @@ import (
 	"github.com/newrelic/newrelic-client-go/newrelic"
 )
 
-const (
-	infraAgentRecipeName = "infrastructure-agent-installer"
-	loggingRecipeName    = "logs-integration"
-)
-
 type RecipeInstaller struct {
 	InstallerContext
 	discoverer        discovery.Discoverer
@@ -30,28 +26,29 @@ type RecipeInstaller struct {
 	recipeExecutor    execution.RecipeExecutor
 	recipeValidator   validation.RecipeValidator
 	recipeFileFetcher recipes.RecipeFileFetcher
-	status            *execution.StatusRollup
+	status            *execution.InstallStatus
 	prompter          ux.Prompter
 	progressIndicator ux.ProgressIndicator
+	licenseKeyFetcher LicenseKeyFetcher
 }
 
 func NewRecipeInstaller(ic InstallerContext, nrClient *newrelic.NewRelic) *RecipeInstaller {
 	rf := recipes.NewServiceRecipeFetcher(&nrClient.NerdGraph)
 	pf := discovery.NewRegexProcessFilterer(rf)
 	ff := recipes.NewRecipeFileFetcher()
-	ers := []execution.StatusReporter{
+	ers := []execution.StatusSubscriber{
 		execution.NewNerdStorageStatusReporter(&nrClient.NerdStorage),
 		execution.NewTerminalStatusReporter(),
 	}
-	statusRollup := execution.NewStatusRollup(ers)
+	lkf := NewServiceLicenseKeyFetcher(&nrClient.NerdGraph)
+	statusRollup := execution.NewInstallStatus(ers)
 
 	d := discovery.NewPSUtilDiscoverer(pf)
 	gff := discovery.NewGlobFileFilterer()
 	re := execution.NewGoTaskRecipeExecutor()
 	v := validation.NewPollingRecipeValidator(&nrClient.Nrdb)
 	p := ux.NewPromptUIPrompter()
-	// s := ux.NewSpinner()
-	s := ux.NewPlainProgress()
+	pi := ux.NewPlainProgress()
 
 	i := RecipeInstaller{
 		discoverer:        d,
@@ -62,15 +59,14 @@ func NewRecipeInstaller(ic InstallerContext, nrClient *newrelic.NewRelic) *Recip
 		recipeFileFetcher: ff,
 		status:            statusRollup,
 		prompter:          p,
-		progressIndicator: s,
-	}
+		progressIndicator: pi,
+		licenseKeyFetcher: lkf}
 
 	i.InstallerContext = ic
 
 	return &i
 }
 
-// nolint:gocyclo
 func (i *RecipeInstaller) Install() error {
 	fmt.Printf(`
    _   _                 ____      _ _
@@ -98,211 +94,71 @@ func (i *RecipeInstaller) Install() error {
 		"RecipeNamesProvided":       i.RecipeNamesProvided(),
 	}).Debug("context summary")
 
-	// Execute the discovery process, exiting on failure.
-	m, err := i.discover()
-	if err != nil {
-		return i.fail(err)
-	}
+	ctx, cancel := context.WithCancel(utils.SignalCtx)
+	defer cancel()
 
-	var recipes []types.Recipe
-	var allRecipes []types.Recipe
+	errChan := make(chan error)
+	var err error
 
-	if i.RecipePathsProvided() {
-		// Load the recipes from the provided file names.
-		for _, n := range i.RecipePaths {
-			log.Debugln(fmt.Sprintf("Attempting to match recipePath %s.", n))
-			var recipe *types.Recipe
-			recipe, err = i.recipeFromPath(n)
-			if err != nil {
-				log.Debugln(fmt.Sprintf("Error while building recipe from path, detail:%s.", err))
-				return i.fail(err)
-			}
+	go func(ctx context.Context) {
+		errChan <- i.discoverAndRun(ctx)
+	}(ctx)
 
-			log.WithFields(log.Fields{
-				"name":         recipe.Name,
-				"display_name": recipe.DisplayName,
-				"path":         n,
-			}).Debug("found recipe at path")
-
-			recipes = append(recipes, *recipe)
-		}
-	} else if i.RecipeNamesProvided() {
-		// Fetch the provided recipes from the recipe service.
-		for _, n := range i.RecipeNames {
-			log.Debugln(fmt.Sprintf("Attempting to match recipeName %s.", n))
-			r := i.fetchWarn(m, n)
-			if r != nil {
-				// Skip anything that was returned by the service if it does not match the requested name.
-				if r.Name == n {
-					log.Debugln(fmt.Sprintf("Found recipe from name %s.", n))
-					recipes = append(recipes, *r)
-				} else {
-					log.Debugln(fmt.Sprintf("Skipping recipe, name %s does not match.", r.Name))
-				}
-			}
-		}
-	} else if i.ShouldRunDiscovery() {
-		recipes, err = i.fetchRecommendations(m)
-		if err != nil {
-			log.Debugf("error fetching recommendations: %s", err)
-			return i.fail(err)
-		}
-
-		if len(recipes) == 0 {
-			log.Debug("no available integrations found")
-		}
-
-		if i.SkipIntegrations {
-			for _, r := range recipes {
-				i.status.ReportRecipeSkipped(execution.RecipeStatusEvent{Recipe: r})
-			}
-		}
-	}
-
-	infraAgentRecipe, err := i.fetchRecipeAndReport(m, infraAgentRecipeName)
-	if err != nil {
-		return err
-	}
-
-	loggingRecipe, err := i.fetchRecipeAndReport(m, loggingRecipeName)
-	if err != nil {
-		return err
-	}
-
-	// Include Logging and Infra recipes in the report
-	recipesForReport := []types.Recipe{}
-
-	if i.ShouldInstallInfraAgent() {
-		if infraAgentRecipe != nil {
-			recipesForReport = append(recipesForReport, *infraAgentRecipe)
-		}
-	}
-
-	if i.ShouldInstallLogging() {
-		if loggingRecipe != nil {
-			recipesForReport = append(recipesForReport, *loggingRecipe)
-		}
-	}
-
-	if !i.SkipIntegrations {
-		recipesForReport = append(recipesForReport, recipes...)
-	}
-
-	// Report discovered recipes as available
-	i.status.ReportRecipesAvailable(recipesForReport)
-
-	// If guided installation, prompt user to determine what to skip and what to
-	// include.  Infra install is required and so we should not ask the user if
-	// they want to install it.
-	if !i.RecipesProvided() {
-		var filteredRecipes []types.Recipe
-		filteredRecipes, err = i.filterSkippedRecipes(recipesForReport)
-		if err != nil {
-			return i.fail(err)
-		}
-
-		// Save the original results from the Recommendations endpoint call
-		allRecipes = append(allRecipes, recipes...)
-		recipes = filteredRecipes
-	}
-
-	var entityGUID string
-
-	if i.ShouldInstallInfraAgent() {
-		log.Debugf("Installing infrastructure agent")
-		entityGUID, err = i.executeAndValidateWithProgress(m, infraAgentRecipe)
-		if err != nil {
-			log.Error(i.failMessage(infraAgentRecipeName))
-			return i.fail(err)
-		}
-		log.Debugf("Done installing infrastructure agent.")
-	}
-
-	if i.ShouldInstallLogging() {
-		log.Debugf("Installing logging")
-		if err = i.installLogging(m, loggingRecipe, recipes); err != nil {
-			log.Error(i.failMessage(loggingRecipeName))
-			return i.fail(err)
-		}
-		log.Debugf("Done installing logging.")
-	}
-
-	// Install integrations if necessary, continuing on failure with warnings.
-	if i.ShouldInstallIntegrations() {
-		log.Debugf("Installing integrations")
-		if err = i.installRecipes(m, recipes, entityGUID); err != nil {
+	select {
+	case <-ctx.Done():
+		i.status.InstallCanceled()
+		return nil
+	case err = <-errChan:
+		if err == types.ErrInterrupt {
+			i.status.InstallCanceled()
 			return err
 		}
-		log.Debugf("Done installing integrations.")
+
+		i.status.InstallComplete()
+
+		return err
 	}
-
-	for _, r := range allRecipes {
-		if isAppTarget(r) {
-			i.status.ReportRecipeRecommended(execution.RecipeStatusEvent{
-				Recipe:     r,
-				EntityGUID: entityGUID,
-			})
-		}
-	}
-
-	i.status.ReportComplete()
-
-	return nil
 }
 
-func (i *RecipeInstaller) installRecipes(m *types.DiscoveryManifest, recipes []types.Recipe, entityGUID string) error {
+func (i *RecipeInstaller) discoverAndRun(ctx context.Context) error {
+	// Execute the discovery process, exiting on failure.
+	m, err := i.discover(ctx)
+	if err != nil {
+		return err
+	}
+
+	i.status.DiscoveryComplete(*m)
+
+	if i.RecipesProvided() {
+		// Run the targeted (AKA stitched path) installer.
+		return i.targetedInstall(ctx, m)
+	}
+
+	// Run the guided installer.
+	return i.guidedInstall(ctx, m)
+}
+
+func (i *RecipeInstaller) installRecipes(ctx context.Context, m *types.DiscoveryManifest, recipes []types.Recipe) error {
 	log.WithFields(log.Fields{
 		"recipe_count": len(recipes),
 	}).Debug("installing recipes")
 
-	isHostTarget := func(recipe types.Recipe) bool {
-		for _, target := range recipe.InstallTargets {
-			if target.Type != types.OpenInstallationTargetTypeTypes.HOST {
-				return false
-			}
-		}
-
-		return true
-	}
-
 	for _, r := range recipes {
-		// The infra and logging install have their own install methods.  In the
-		// case where the recommendations come back with either of these recipes,
-		// we skip here to avoid duplicate installation.
-		if !i.RecipesProvided() {
-			if r.Name == infraAgentRecipeName || r.Name == loggingRecipeName {
-				log.WithFields(log.Fields{
-					"name": r.Name,
-				}).Debug("skipping special recipe")
-
-				continue
-			}
-		}
-
-		// Skip non-HOST recipes, but report status of them.
-		if !isHostTarget(r) {
-			log.WithFields(log.Fields{
-				"name": r.Name,
-			}).Debug("skipping non-HOST recipe")
-
-			continue
-		}
-
 		var err error
 
 		log.WithFields(log.Fields{
 			"name": r.Name,
 		}).Debug("installing recipe")
 
-		_, err = i.executeAndValidateWithProgress(m, &r)
+		_, err = i.executeAndValidateWithProgress(ctx, m, &r)
 		if err != nil {
-			if serr, ok := err.(*types.ErrInterrupt); ok {
-				return serr
+			if err == types.ErrInterrupt {
+				return err
 			}
 
 			log.Debugf("Failed while executing and validating with progress for recipe name %s, detail:%s", r.Name, err)
 			log.Warn(err)
-			log.Warn(i.failMessage(r.Name))
+			log.Warn(i.failMessage(r.DisplayName))
 
 			if len(recipes) == 1 {
 				return err
@@ -314,10 +170,10 @@ func (i *RecipeInstaller) installRecipes(m *types.DiscoveryManifest, recipes []t
 	return nil
 }
 
-func (i *RecipeInstaller) discover() (*types.DiscoveryManifest, error) {
+func (i *RecipeInstaller) discover(ctx context.Context) (*types.DiscoveryManifest, error) {
 	log.Debug("discovering system information")
 
-	m, err := i.discoverer.Discover(utils.SignalCtx)
+	m, err := i.discoverer.Discover(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("there was an error discovering system info: %s", err)
 	}
@@ -325,156 +181,17 @@ func (i *RecipeInstaller) discover() (*types.DiscoveryManifest, error) {
 	return m, nil
 }
 
-func (i *RecipeInstaller) recipeFromPath(recipePath string) (*types.Recipe, error) {
-	recipeURL, parseErr := url.Parse(recipePath)
-	if parseErr == nil && recipeURL.Scheme != "" {
-		f, err := i.recipeFileFetcher.FetchRecipeFile(recipeURL)
-		if err != nil {
-			return nil, fmt.Errorf("could not fetch file %s: %s", recipePath, err)
-		}
-		return finalizeRecipe(f)
-	}
+func (i *RecipeInstaller) executeAndValidate(ctx context.Context, m *types.DiscoveryManifest, r *types.Recipe, vars types.RecipeVars) (string, error) {
+	i.status.RecipeInstalling(execution.RecipeStatusEvent{Recipe: *r})
 
-	f, err := i.recipeFileFetcher.LoadRecipeFile(recipePath)
-	if err != nil {
-		return nil, fmt.Errorf("could not load file %s: %s", recipePath, err)
-	}
-
-	return finalizeRecipe(f)
-}
-
-func finalizeRecipe(f *recipes.RecipeFile) (*types.Recipe, error) {
-	r, err := f.ToRecipe()
-	if err != nil {
-		return nil, fmt.Errorf("could not finalize recipe %s: %s", f.Name, err)
-	}
-	return r, nil
-}
-
-func (i *RecipeInstaller) fetchRecipeAndReport(m *types.DiscoveryManifest, recipeName string) (*types.Recipe, error) {
-	log.WithFields(log.Fields{
-		"name": recipeName,
-	}).Debug("fetching recipe for install")
-
-	r, err := i.fetch(m, recipeName)
-	if err != nil {
-		return nil, err
-	}
-
-	switch recipeName {
-	case loggingRecipeName:
-		if i.SkipLoggingInstall {
-			i.status.ReportRecipeSkipped(execution.RecipeStatusEvent{Recipe: *r})
-		} else {
-			i.status.ReportRecipeAvailable(*r)
-		}
-	default:
-		i.status.ReportRecipeAvailable(*r)
-	}
-
-	return r, nil
-}
-
-func (i *RecipeInstaller) installLogging(m *types.DiscoveryManifest, r *types.Recipe, recipes []types.Recipe) error {
-	log.WithFields(log.Fields{
-		"recipe_count": len(recipes),
-	}).Debug("filtering log matches")
-	logMatches, err := i.fileFilterer.Filter(utils.SignalCtx, recipes)
-	if err != nil {
-		return err
-	}
-
-	log.WithFields(log.Fields{
-		"possible_matches": len(logMatches),
-	}).Debug("filtered log matches")
-
-	var acceptedLogMatches []types.LogMatch
-	var ok bool
-	for _, match := range logMatches {
-		ok, err = i.userAcceptsLogFile(match)
-		if err != nil {
-			return err
-		}
-
-		if ok {
-			acceptedLogMatches = append(acceptedLogMatches, match)
-		}
-	}
-
-	log.WithFields(log.Fields{
-		"matches": acceptedLogMatches,
-	}).Debug("matches accepted")
-
-	// The struct to approximate the logging configuration file of the Infra Agent.
-	type loggingConfig struct {
-		Logs []types.LogMatch `yaml:"logs"`
-	}
-
-	r.AddVar("DISCOVERED_LOG_FILES", loggingConfig{Logs: acceptedLogMatches})
-
-	_, err = i.executeAndValidateWithProgress(m, r)
-	return err
-}
-
-func (i *RecipeInstaller) fetchRecommendations(m *types.DiscoveryManifest) ([]types.Recipe, error) {
-	log.Debug("fetching recommended recipes")
-
-	recipes, err := i.recipeFetcher.FetchRecommendations(utils.SignalCtx, m)
-	if err != nil {
-		return nil, fmt.Errorf("error retrieving recipe recommendations: %s", err)
-	}
-
-	names := []string{}
-	if log.IsLevelEnabled(log.DebugLevel) {
-		for _, r := range recipes {
-			names = append(names, r.Name)
-		}
-	}
-
-	log.WithFields(log.Fields{
-		"names":        names,
-		"recipe_count": len(recipes),
-	}).Debug("recipes received")
-
-	return recipes, nil
-}
-
-func (i *RecipeInstaller) fetchWarn(m *types.DiscoveryManifest, recipeName string) *types.Recipe {
-	r, err := i.recipeFetcher.FetchRecipe(utils.SignalCtx, m, recipeName)
-	if err != nil {
-		log.Warnf("Could not install %s. Error retrieving recipe: %s", recipeName, err)
-		return nil
-	}
-
-	if r == nil {
-		log.Warnf("Recipe %s not found. Skipping installation.", recipeName)
-	}
-
-	return r
-}
-
-func (i *RecipeInstaller) fetch(m *types.DiscoveryManifest, recipeName string) (*types.Recipe, error) {
-	r, err := i.recipeFetcher.FetchRecipe(utils.SignalCtx, m, recipeName)
-	if err != nil {
-		return nil, fmt.Errorf("error retrieving recipe %s: %s", recipeName, err)
-	}
-
-	if r == nil {
-		return nil, fmt.Errorf("recipe %s not found", recipeName)
-	}
-
-	return r, nil
-}
-
-func (i *RecipeInstaller) executeAndValidate(m *types.DiscoveryManifest, r *types.Recipe, vars types.RecipeVars) (string, error) {
 	// Execute the recipe steps.
-	if err := i.recipeExecutor.Execute(utils.SignalCtx, *m, *r, vars); err != nil {
-		if serr, ok := err.(*types.ErrInterrupt); ok {
-			return "", serr
+	if err := i.recipeExecutor.Execute(ctx, *m, *r, vars); err != nil {
+		if err == types.ErrInterrupt {
+			return "", err
 		}
 
 		msg := fmt.Sprintf("encountered an error while executing %s: %s", r.Name, err)
-		i.status.ReportRecipeFailed(execution.RecipeStatusEvent{
+		i.status.RecipeFailed(execution.RecipeStatusEvent{
 			Recipe: *r,
 			Msg:    msg,
 		})
@@ -483,45 +200,56 @@ func (i *RecipeInstaller) executeAndValidate(m *types.DiscoveryManifest, r *type
 
 	var entityGUID string
 	var err error
+	var validationDurationMilliseconds int64
+	start := time.Now()
 	if r.ValidationNRQL != "" {
-		entityGUID, err = i.recipeValidator.Validate(utils.SignalCtx, *m, *r)
+		entityGUID, err = i.recipeValidator.Validate(ctx, *m, *r)
 		if err != nil {
+			validationDurationMilliseconds = time.Since(start).Milliseconds()
 			msg := fmt.Sprintf("encountered an error while validating receipt of data for %s: %s", r.Name, err)
-			i.status.ReportRecipeFailed(execution.RecipeStatusEvent{
-				Recipe: *r,
-				Msg:    msg,
+			i.status.RecipeFailed(execution.RecipeStatusEvent{
+				Recipe:                         *r,
+				Msg:                            msg,
+				ValidationDurationMilliseconds: validationDurationMilliseconds,
 			})
 			return "", errors.New(msg)
 		}
 	} else {
-		log.Debugf("Skipping validation due to missing validation query.")
+		log.Debugf("skipping validation due to missing validation query")
 	}
 
-	i.status.ReportRecipeInstalled(execution.RecipeStatusEvent{
-		Recipe:     *r,
-		EntityGUID: entityGUID,
+	validationDurationMilliseconds = time.Since(start).Milliseconds()
+	i.status.RecipeInstalled(execution.RecipeStatusEvent{
+		Recipe:                         *r,
+		EntityGUID:                     entityGUID,
+		ValidationDurationMilliseconds: validationDurationMilliseconds,
 	})
 
 	return entityGUID, nil
 }
 
-func (i *RecipeInstaller) executeAndValidateWithProgress(m *types.DiscoveryManifest, r *types.Recipe) (string, error) {
+func (i *RecipeInstaller) executeAndValidateWithProgress(ctx context.Context, m *types.DiscoveryManifest, r *types.Recipe) (string, error) {
+	msg := fmt.Sprintf("Installing %s", r.Name)
+	i.progressIndicator.Start(msg)
+	defer func() { i.progressIndicator.Stop() }()
+
 	if r.PreInstallMessage() != "" {
 		fmt.Println(r.PreInstallMessage())
 	}
 
-	vars, err := i.recipeExecutor.Prepare(utils.SignalCtx, *m, *r, i.AssumeYes)
+	licenseKey, err := i.licenseKeyFetcher.FetchLicenseKey(ctx)
 	if err != nil {
 		return "", err
 	}
 
-	i.progressIndicator.Start(fmt.Sprintf("Installing %s", r.Name))
-	defer func() { i.progressIndicator.Stop() }()
-	i.status.ReportRecipeInstalling(execution.RecipeStatusEvent{Recipe: *r})
-
-	entityGUID, err := i.executeAndValidate(m, r, vars)
+	vars, err := i.recipeExecutor.Prepare(ctx, *m, *r, i.AssumeYes, licenseKey)
 	if err != nil {
-		i.progressIndicator.Fail()
+		return "", err
+	}
+
+	entityGUID, err := i.executeAndValidate(ctx, m, r, vars)
+	if err != nil {
+		i.progressIndicator.Fail(msg)
 		return "", err
 	}
 
@@ -529,126 +257,41 @@ func (i *RecipeInstaller) executeAndValidateWithProgress(m *types.DiscoveryManif
 		fmt.Println(r.PostInstallMessage())
 	}
 
-	i.progressIndicator.Success()
+	i.progressIndicator.Success(msg)
 	return entityGUID, nil
 }
 
-func (i *RecipeInstaller) userAccepts(msg string) (bool, error) {
-	if i.AssumeYes {
-		return true, nil
-	}
-
-	val, err := i.prompter.PromptYesNo(msg)
-	if err != nil {
-		return false, err
-	}
-
-	return val, nil
-}
-
-func (i *RecipeInstaller) userAcceptsLogFile(match types.LogMatch) (bool, error) {
-	msg := fmt.Sprintf("Files have been found at the following pattern: %s Do you want to watch them?", match.File)
-	return i.userAccepts(msg)
-}
-
-func (i *RecipeInstaller) fail(err error) error {
-	i.status.ReportComplete()
-	return err
-}
-
 func (i *RecipeInstaller) failMessage(componentName string) error {
-
-	u, _ := url.Parse("https://docs.newrelic.com/search#")
-	q := u.Query()
-	q.Set("query", componentName)
-	u.RawQuery = q.Encode()
-
-	searchURL := u.String()
+	searchURL := "https://docs.newrelic.com/docs/using-new-relic/cross-product-functions/troubleshooting/not-seeing-data/"
 
 	return fmt.Errorf("execution of %s failed, please see the following link for clues on how to resolve the issue: %s", componentName, searchURL)
 }
 
-func (i *RecipeInstaller) recipeInRecipes(recipe types.Recipe, recipes []types.Recipe) bool {
-	for _, r := range recipes {
-		if recipe.Name == r.Name {
-			return true
-		}
+func (i *RecipeInstaller) fetchRecipeAndReportAvailable(ctx context.Context, m *types.DiscoveryManifest, recipeName string) (*types.Recipe, error) {
+	log.WithFields(log.Fields{
+		"name": recipeName,
+	}).Debug("fetching recipe for install")
+
+	r, err := i.fetch(ctx, m, recipeName)
+	if err != nil {
+		return nil, err
 	}
 
-	return false
+	i.status.RecipeAvailable(*r)
+
+	return r, nil
 }
 
-func (i *RecipeInstaller) filterSkippedRecipes(recipes []types.Recipe) ([]types.Recipe, error) {
-	var filteredRecipes []types.Recipe
-	// Start off skipping everything
-	i.SkipLoggingInstall = true
-	i.SkipIntegrations = true
-
-	reportedDisplayNames := []string{}
-	for _, r := range recipes {
-		// Never offer to skip the infra agent installation
-		if r.Name == infraAgentRecipeName {
-			continue
-		}
-
-		reportedDisplayNames = append(reportedDisplayNames, r.DisplayName)
+func (i *RecipeInstaller) fetch(ctx context.Context, m *types.DiscoveryManifest, recipeName string) (*types.Recipe, error) {
+	r, err := i.recipeFetcher.FetchRecipe(ctx, m, recipeName)
+	if err != nil {
+		log.Errorf("error retrieving recipe %s: %s", recipeName, err)
+		return nil, err
 	}
 
-	var selectedRecipeNames []string
-	if i.AssumeYes {
-		// When -y is supplied, select all the recipes that were in the report for install.
-		selectedRecipeNames = reportedDisplayNames
-	} else {
-		var promptErr error
-		selectedRecipeNames, promptErr = i.prompter.MultiSelect("Please choose what instrumentation you would like to install:", reportedDisplayNames)
-		if promptErr != nil {
-			return nil, promptErr
-		}
+	if r == nil {
+		return nil, fmt.Errorf("recipe %s not found", recipeName)
 	}
 
-	// Find the intersection of the selected recipes by DisplayName and the
-	// recipesForReport, which is the infra and logging recipe + the OHIs.
-	for _, selectedRecipeName := range selectedRecipeNames {
-		for _, r := range recipes {
-			if r.DisplayName == selectedRecipeName {
-				// Disable skip if logging was selected
-				if r.Name == loggingRecipeName {
-					i.SkipLoggingInstall = false
-				}
-
-				// Disable skip if what we have is neither logging no infra
-				if r.Name != infraAgentRecipeName && r.Name != loggingRecipeName {
-					i.SkipIntegrations = false
-				}
-
-				filteredRecipes = append(filteredRecipes, r)
-			}
-		}
-	}
-
-	log.Debug("skipping recipes that were not selected")
-	for _, r := range recipes {
-		// Never offer to skip the infra agent installation
-		if r.Name == infraAgentRecipeName {
-			continue
-		}
-
-		if !i.recipeInRecipes(r, filteredRecipes) {
-			i.status.ReportRecipeSkipped(execution.RecipeStatusEvent{
-				Recipe: r,
-			})
-		}
-	}
-
-	return filteredRecipes, nil
-}
-
-func isAppTarget(recipe types.Recipe) bool {
-	for _, target := range recipe.InstallTargets {
-		if target.Type != types.OpenInstallationTargetTypeTypes.APPLICATION {
-			return false
-		}
-	}
-
-	return true
+	return r, nil
 }

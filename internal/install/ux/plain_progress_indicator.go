@@ -18,19 +18,28 @@ func NewPlainProgress() *PlainProgress {
 func (p *PlainProgress) Start(msg string) {
 	c := color.New(color.FgCyan)
 	c.Printf("==>")
-
 	x := color.New(color.Bold)
 	x.Printf(" %s", msg)
 
-	fmt.Printf("... ")
+	fmt.Printf("...\n")
 }
 
-func (p *PlainProgress) Success() {
-	fmt.Println("success")
+func (p *PlainProgress) Success(msg string) {
+	c := color.New(color.FgCyan)
+	c.Printf("==>")
+	x := color.New(color.Bold)
+	x.Printf(" %s", msg)
+
+	fmt.Printf("...success.\n\n")
 }
 
-func (p *PlainProgress) Fail() {
-	fmt.Println("fail")
+func (p *PlainProgress) Fail(msg string) {
+	c := color.New(color.FgCyan)
+	c.Printf("==>")
+	x := color.New(color.Bold)
+	x.Printf(" %s", msg)
+
+	fmt.Printf("...failed.\n\n")
 }
 
 func (p *PlainProgress) Stop() {}

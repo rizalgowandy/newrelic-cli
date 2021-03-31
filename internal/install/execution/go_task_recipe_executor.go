@@ -30,7 +30,7 @@ func NewGoTaskRecipeExecutor() *GoTaskRecipeExecutor {
 	return &GoTaskRecipeExecutor{}
 }
 
-func (re *GoTaskRecipeExecutor) Prepare(ctx context.Context, m types.DiscoveryManifest, r types.Recipe, assumeYes bool) (types.RecipeVars, error) {
+func (re *GoTaskRecipeExecutor) Prepare(ctx context.Context, m types.DiscoveryManifest, r types.Recipe, assumeYes bool, licenseKey string) (types.RecipeVars, error) {
 	log.WithFields(log.Fields{
 		"name": r.Name,
 	}).Debug("preparing recipe")
@@ -41,7 +41,7 @@ func (re *GoTaskRecipeExecutor) Prepare(ctx context.Context, m types.DiscoveryMa
 
 	systemInfoResult := varsFromSystemInfo(m)
 
-	profileResult, err := varsFromProfile()
+	profileResult, err := varsFromProfile(licenseKey)
 	if err != nil {
 		return types.RecipeVars{}, err
 	}
@@ -80,12 +80,12 @@ func (re *GoTaskRecipeExecutor) Execute(ctx context.Context, m types.DiscoveryMa
 
 	f, err := recipes.RecipeToRecipeFile(r)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not convert recipe to recipe file: %s", err)
 	}
 
 	out, err := yaml.Marshal(f.Install)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not marshal recipe file: %s", err)
 	}
 
 	// Create a temporary task file.
@@ -104,16 +104,17 @@ func (re *GoTaskRecipeExecutor) Execute(ctx context.Context, m types.DiscoveryMa
 		Entrypoint: file.Name(),
 		Stderr:     os.Stderr,
 		Stdout:     os.Stdout,
+		Stdin:      os.Stdin,
 	}
 
 	if err = e.Setup(); err != nil {
-		return err
+		return fmt.Errorf("could not set up task executor: %s", err)
 	}
 
 	var tf taskfile.Taskfile
 	err = yaml.Unmarshal(out, &tf)
 	if err != nil {
-		return err
+		return fmt.Errorf("could not unmarshal taskfile: %s", err)
 	}
 
 	calls, globals := taskargs.ParseV3()
@@ -127,7 +128,7 @@ func (re *GoTaskRecipeExecutor) Execute(ctx context.Context, m types.DiscoveryMa
 		// go-task does not provide an error type to denote context cancelation
 		// Therefore we need to match inside the error message
 		if strings.Contains(err.Error(), "context canceled") {
-			return types.NewErrInterrupt()
+			return types.ErrInterrupt
 		}
 
 		return err
@@ -136,15 +137,15 @@ func (re *GoTaskRecipeExecutor) Execute(ctx context.Context, m types.DiscoveryMa
 	return nil
 }
 
-func varsFromProfile() (types.RecipeVars, error) {
+func varsFromProfile(licenseKey string) (types.RecipeVars, error) {
 	defaultProfile := credentials.DefaultProfile()
-	if defaultProfile.LicenseKey == "" {
-		return types.RecipeVars{}, errors.New("license key not found in default profile")
+	if licenseKey == "" {
+		return types.RecipeVars{}, errors.New("license key not found")
 	}
 
 	vars := make(types.RecipeVars)
 
-	vars["NEW_RELIC_LICENSE_KEY"] = defaultProfile.LicenseKey
+	vars["NEW_RELIC_LICENSE_KEY"] = licenseKey
 	vars["NEW_RELIC_ACCOUNT_ID"] = strconv.Itoa(defaultProfile.AccountID)
 	vars["NEW_RELIC_API_KEY"] = defaultProfile.APIKey
 	vars["NEW_RELIC_REGION"] = defaultProfile.Region
@@ -212,7 +213,7 @@ func varsFromInput(inputVars []recipes.VariableConfig, assumeYes bool) (types.Re
 			envValue, err = varFromPrompt(envConfig)
 			if err != nil {
 				if err == promptui.ErrInterrupt {
-					return types.RecipeVars{}, types.NewErrInterrupt()
+					return types.RecipeVars{}, types.ErrInterrupt
 				}
 
 				return types.RecipeVars{}, fmt.Errorf("prompt failed: %s", err)
